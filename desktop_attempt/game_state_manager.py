@@ -133,6 +133,21 @@ class CoreGameState:
         return state_vector
 
 
+@jax.jit
+def _jit_batch_predict(batch_tensor: jnp.ndarray) -> Dict[str, jnp.ndarray]:
+    """Static JIT-compiled batch prediction function"""
+    batch_size = batch_tensor.shape[0]
+    
+    # Simulate predictions (placeholder - would use actual model)
+    batch_predictions = {
+        'play': jnp.ones((batch_size, 10)),
+        'drive': jnp.ones((batch_size, 5)), 
+        'game': jnp.ones((batch_size, 3))
+    }
+    
+    return batch_predictions
+
+
 class GameStateManager:
     """
     Advanced game state management with cached recent states
@@ -664,7 +679,6 @@ class ParallelGameSimulator:
         
         return batch_predictions
     
-    @jax.jit
     def _tpu_batch_predict(self, batch_inputs: Dict) -> Dict:
         """TPU-optimized batch prediction for multiple games"""
         game_ids = list(batch_inputs.keys())
@@ -676,15 +690,16 @@ class ParallelGameSimulator:
             feature_vector = self._context_to_feature_vector(context)
             batch_features.append(feature_vector)
         
-        # Batch prediction
-        batch_tensor = jnp.stack(batch_features)
-        
-        # Simulate predictions (placeholder - would use actual model)
-        batch_predictions_tensor = {
-            'play': jnp.ones((len(game_ids), 10)),
-            'drive': jnp.ones((len(game_ids), 5)),
-            'game': jnp.ones((len(game_ids), 3))
-        }
+        # Batch prediction using static JIT function
+        if batch_features:
+            batch_tensor = jnp.stack(batch_features)
+            batch_predictions_tensor = _jit_batch_predict(batch_tensor)
+        else:
+            batch_predictions_tensor = {
+                'play': jnp.array([]),
+                'drive': jnp.array([]),
+                'game': jnp.array([])
+            }
         
         # Convert back to per-game predictions
         batch_results = {}

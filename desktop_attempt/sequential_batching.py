@@ -6,6 +6,8 @@ Optimized for JAX/Flax TPU training with game-centric organization
 
 import jax
 import jax.numpy as jnp
+# Enable 64-bit precision for large integers
+jax.config.update("jax_enable_x64", True)
 import numpy as np
 from typing import Dict, List, Tuple, Optional, Any, Iterator
 from dataclasses import dataclass
@@ -26,9 +28,9 @@ else:
 @dataclass
 class SequentialBatchConfig:
     """Configuration for sequential batching"""
-    max_plays_per_drive: int = 18  # 99.1% coverage
-    max_drives_per_game: int = 32
-    batch_size: int = 1536  # TPU v2-8 optimized
+    max_plays_per_drive: int = 18  # Restored to original dimensions
+    max_drives_per_game: int = 32  # Restored to original dimensions
+    batch_size: int = 256  # Reduced for memory constraints
     prefetch_size: int = 4
     cache_sequences: bool = True
     drive_padding_strategy: str = "adaptive"  # "adaptive" or "fixed"
@@ -65,57 +67,104 @@ class CFBSequentialBatcher:
         
     def create_game_sequences(self, 
                             preprocessed_data: Dict[str, jnp.ndarray],
-                            game_metadata: Dict[str, np.ndarray]) -> Dict[str, jnp.ndarray]:
+                            game_metadata: Dict[str, np.ndarray], 
+                            chunk_size: int = 64) -> Dict[str, jnp.ndarray]:
         """
-        Create game-centric sequences with drive boundaries preserved
+        Create game-centric sequences with STREAMING processing for memory efficiency
         
         Args:
             preprocessed_data: Output from CFBDataPreprocessor with JAX arrays
             game_metadata: Game, drive, and play IDs
+            chunk_size: Number of games to process at once (default: 64)
             
         Returns:
             Dictionary with sequences, masks, and metadata
         """
-        self.logger.info("🔄 Creating game-centric sequences...")
+        self.logger.info("🔄 Creating game-centric sequences with streaming...")
         
         # Group plays by games
         game_groups = self._group_plays_by_game(preprocessed_data, game_metadata)
         
-        # Process each game into sequences
-        sequences = defaultdict(list)
-        masks = []
-        game_info = []
+        # Process games in chunks to avoid memory explosion
+        game_ids = list(game_groups.keys())
+        total_games = len(game_ids)
         
-        for game_id, game_data in game_groups.items():
-            # Check cache first
-            cache_key = f"game_{game_id}"
-            if self.config.cache_sequences and cache_key in self.sequence_cache:
-                cached_seq, cached_mask, cached_info = self.sequence_cache[cache_key]
-                self.cache_stats['hits'] += 1
-            else:
-                # Create sequence for this game
-                cached_seq, cached_mask, cached_info = self._process_single_game(
-                    game_id, game_data
-                )
-                
-                if self.config.cache_sequences:
-                    self.sequence_cache[cache_key] = (cached_seq, cached_mask, cached_info)
-                self.cache_stats['misses'] += 1
+        all_sequences = defaultdict(list)
+        all_masks = []
+        all_game_info = []
+        
+        self.logger.info(f"📦 Processing {total_games} games in chunks of {chunk_size}")
+        
+        for chunk_start in range(0, total_games, chunk_size):
+            chunk_end = min(chunk_start + chunk_size, total_games)
+            chunk_game_ids = game_ids[chunk_start:chunk_end]
             
-            # Append to lists
-            for key, value in cached_seq.items():
-                sequences[key].append(value)
-            masks.append(cached_mask)
-            game_info.append(cached_info)
+            # Process this chunk
+            chunk_sequences = defaultdict(list)
+            chunk_masks = []
+            chunk_game_info = []
+            
+            for game_id in chunk_game_ids:
+                game_data = game_groups[game_id]
+                
+                # Check cache first
+                cache_key = f"game_{game_id}"
+                if self.config.cache_sequences and cache_key in self.sequence_cache:
+                    cached_seq, cached_mask, cached_info = self.sequence_cache[cache_key]
+                    self.cache_stats['hits'] += 1
+                else:
+                    # Create sequence for this game
+                    cached_seq, cached_mask, cached_info = self._process_single_game(
+                        game_id, game_data
+                    )
+                    
+                    if self.config.cache_sequences:
+                        self.sequence_cache[cache_key] = (cached_seq, cached_mask, cached_info)
+                    self.cache_stats['misses'] += 1
+                
+                # Accumulate in chunk
+                for key, value in cached_seq.items():
+                    chunk_sequences[key].append(value)
+                chunk_masks.append(cached_mask)
+                chunk_game_info.append(cached_info)
+            
+            # Stack this chunk efficiently
+            chunk_batched = self._create_batched_tensors(
+                chunk_sequences, chunk_masks, chunk_game_info
+            )
+            
+            # Accumulate chunks (this is memory-efficient since chunks are small)
+            for key, value in chunk_batched['sequences'].items():
+                all_sequences[key].append(value)
+            all_masks.append(chunk_batched['masks'])
+            all_game_info.extend(chunk_batched['metadata'])
+            
+            self.logger.info(f"  ✅ Processed chunk {chunk_start//chunk_size + 1}/{(total_games-1)//chunk_size + 1}")
         
-        # Stack all games into batched tensors
-        batched_sequences = self._create_batched_tensors(sequences, masks, game_info)
+        # Final concatenation of chunks
+        final_sequences = {}
+        for key, chunk_list in all_sequences.items():
+            final_sequences[key] = jnp.concatenate(chunk_list, axis=0)
         
-        self.logger.info(f"✅ Created {len(game_info)} game sequences")
+        final_masks = jnp.concatenate(all_masks, axis=0)
+        
+        final_result = {
+            'sequences': final_sequences,
+            'masks': final_masks,
+            'metadata': all_game_info,
+            'shape_info': {
+                'batch_size': len(all_game_info),
+                'max_sequence_length': self.config.max_plays_per_drive * self.config.max_drives_per_game,
+                'max_drives': self.config.max_drives_per_game,
+                'max_plays_per_drive': self.config.max_plays_per_drive
+            }
+        }
+        
+        self.logger.info(f"✅ Created {len(all_game_info)} game sequences via streaming")
         self.logger.info(f"📊 Cache stats - Hits: {self.cache_stats['hits']}, "
                         f"Misses: {self.cache_stats['misses']}")
         
-        return batched_sequences
+        return final_result
     
     def _group_plays_by_game(self, 
                            preprocessed_data: Dict[str, jnp.ndarray],
@@ -177,9 +226,9 @@ class CFBSequentialBatcher:
         max_seq_length = self.config.max_plays_per_drive * self.config.max_drives_per_game
         
         sequences = {
-            'plays': np.zeros(max_seq_length, dtype=np.int32),  # Play indices
-            'drives': np.zeros(max_seq_length, dtype=np.int32),  # Drive indices
-            'drive_boundaries': np.zeros(max_seq_length, dtype=np.int32),  # Boundary markers
+            'plays': np.zeros(max_seq_length, dtype=np.int64),  # Play indices
+            'drives': np.zeros(max_seq_length, dtype=np.int64),  # Drive indices
+            'drive_boundaries': np.zeros(max_seq_length, dtype=np.int64),  # Boundary markers
             'temporal_positions': np.zeros(max_seq_length, dtype=np.float32)  # Temporal encoding
         }
         
@@ -189,27 +238,33 @@ class CFBSequentialBatcher:
         drive_end_positions = []
         
         for drive_idx, drive in enumerate(drives[:self.config.max_drives_per_game]):
+            if current_position >= max_seq_length:
+                break
+                
             drive_start_positions.append(current_position)
             
-            # Add drive start marker
-            sequences['drive_boundaries'][current_position] = self.DRIVE_START_TOKEN
+            # Add drive start marker only if there's space
+            if current_position < max_seq_length:
+                sequences['drive_boundaries'][current_position] = self.DRIVE_START_TOKEN
+                current_position += 1
             
             # Process plays in drive
             play_indices = drive['indices']
             num_plays = min(len(play_indices), self.config.max_plays_per_drive)
             
+            plays_added = 0
             for play_idx in range(num_plays):
                 if current_position >= max_seq_length:
                     break
                     
                 sequences['plays'][current_position] = int(play_indices[play_idx])
-                # Ensure integer type for indexing
                 sequences['drives'][current_position] = drive['drive_id']
                 sequences['temporal_positions'][current_position] = current_position / max_seq_length
                 current_position += 1
+                plays_added += 1
             
-            # Add drive end marker
-            if current_position < max_seq_length:
+            # Add drive end marker only if there's space and we added plays
+            if current_position < max_seq_length and plays_added > 0:
                 sequences['drive_boundaries'][current_position] = self.DRIVE_END_TOKEN
                 drive_end_positions.append(current_position)
                 current_position += 1
@@ -235,7 +290,12 @@ class CFBSequentialBatcher:
         }
         
         # Convert to JAX arrays
-        sequences_jax = {k: jnp.array(v, dtype=jnp.float32) for k, v in sequences.items()}
+        sequences_jax = {}
+        for k, v in sequences.items():
+            if k in ['plays', 'drives', 'drive_boundaries']:
+                sequences_jax[k] = jnp.array(v, dtype=jnp.int64)
+            else:
+                sequences_jax[k] = jnp.array(v, dtype=jnp.float32)
         mask_jax = jnp.array(mask, dtype=jnp.float32)
         
         return sequences_jax, mask_jax, metadata

@@ -213,23 +213,35 @@ class CheckpointManager:
             'phase': phase_name
         }
         
-        # Use Flax checkpointing
-        checkpoint_path = self.checkpoint_dir / f'checkpoint_{step}'
-        checkpoints.save_checkpoint(
-            ckpt_dir=str(self.checkpoint_dir),
-            target=checkpoint_data,
-            step=step,
-            prefix='checkpoint_',
-            keep=self.max_to_keep
-        )
+        # Use simple pickle-based saving to avoid JAX monitoring issues
+        checkpoint_path = self.checkpoint_dir / f'checkpoint_{step}.pkl'
+        with open(checkpoint_path, 'wb') as f:
+            pickle.dump(checkpoint_data, f)
+        
+        # Clean up old checkpoints if needed
+        self._cleanup_old_checkpoints()
         
         # Save metadata separately for easy access
         metadata_path = checkpoint_path.with_suffix('.json')
+        def convert_to_serializable(obj):
+            """Convert JAX arrays and numpy types to JSON-serializable Python types"""
+            if hasattr(obj, 'item'):  # JAX/numpy scalar
+                return obj.item()
+            elif isinstance(obj, (np.ndarray, jnp.ndarray)):
+                return float(obj) if obj.size == 1 else obj.tolist()
+            elif isinstance(obj, (np.integer, jnp.integer)):
+                return int(obj)
+            elif isinstance(obj, (np.floating, jnp.floating)):
+                return float(obj)
+            elif obj is None:
+                return None
+            else:
+                return obj
+        
         metadata = {
-            'step': step,
+            'step': int(step),
             'phase': phase_name,
-            'metrics': {k: float(v) if isinstance(v, (np.ndarray, jnp.ndarray)) else v 
-                       for k, v in metrics.items()},
+            'metrics': {k: convert_to_serializable(v) for k, v in metrics.items()},
             'timestamp': pd.Timestamp.now().isoformat()
         }
         
@@ -237,35 +249,62 @@ class CheckpointManager:
             json.dump(metadata, f, indent=2)
         
         self.checkpoint_history.append(metadata)
-        print(f"💾 Checkpoint saved: step {step}, RMSE: {metrics.get('game_rmse', 'N/A'):.3f}")
+        # Try different RMSE metric names or use validation loss
+        rmse_value = metrics.get('val_rmse') or metrics.get('game_rmse') or metrics.get('val_loss')
+        if rmse_value is not None and rmse_value != 'N/A':
+            rmse_str = f"{rmse_value:.3f}"
+        else:
+            rmse_str = 'N/A'
+        print(f"💾 Checkpoint saved: step {step}, Loss: {rmse_str}")
         
         return checkpoint_path
+    
+    def _cleanup_old_checkpoints(self):
+        """Remove old checkpoint files to stay within max_to_keep limit"""
+        checkpoint_files = sorted(
+            [f for f in self.checkpoint_dir.glob('checkpoint_*.pkl')],
+            key=lambda x: int(x.stem.split('_')[1])  # Sort by step number
+        )
+        
+        if len(checkpoint_files) > self.max_to_keep:
+            files_to_remove = checkpoint_files[:-self.max_to_keep]
+            for file_path in files_to_remove:
+                file_path.unlink()  # Delete the file
+                # Also remove corresponding metadata file if exists
+                metadata_path = file_path.with_suffix('.json')
+                if metadata_path.exists():
+                    metadata_path.unlink()
     
     def load_checkpoint(self, step: Optional[int] = None):
         """Load checkpoint by step or latest if step is None"""
         
         if step is None:
-            # Get latest checkpoint
-            checkpoint_data = checkpoints.restore_checkpoint(
-                ckpt_dir=str(self.checkpoint_dir),
-                target=None,
-                prefix='checkpoint_'
+            # Find latest checkpoint
+            checkpoint_files = sorted(
+                [f for f in self.checkpoint_dir.glob('checkpoint_*.pkl')],
+                key=lambda x: int(x.stem.split('_')[1])  # Sort by step number
             )
+            if not checkpoint_files:
+                print("⚠️ No checkpoint found")
+                return None
+            checkpoint_path = checkpoint_files[-1]  # Latest
         else:
             # Load specific checkpoint
-            checkpoint_data = checkpoints.restore_checkpoint(
-                ckpt_dir=str(self.checkpoint_dir),
-                target=None,
-                step=step,
-                prefix='checkpoint_'
-            )
+            checkpoint_path = self.checkpoint_dir / f'checkpoint_{step}.pkl'
+            if not checkpoint_path.exists():
+                print(f"⚠️ Checkpoint for step {step} not found")
+                return None
         
-        if checkpoint_data is None:
-            print("⚠️ No checkpoint found")
+        # Load pickle file
+        try:
+            with open(checkpoint_path, 'rb') as f:
+                checkpoint_data = pickle.load(f)
+            
+            print(f"✅ Loaded checkpoint from step {checkpoint_data.get('step', 'unknown')}")
+            return checkpoint_data
+        except Exception as e:
+            print(f"❌ Failed to load checkpoint: {e}")
             return None
-        
-        print(f"✅ Loaded checkpoint from step {checkpoint_data.get('step', 'unknown')}")
-        return checkpoint_data
     
     def get_best_checkpoint(self, metric_name: str = 'game_rmse', lower_is_better: bool = True):
         """Find best checkpoint based on metric"""

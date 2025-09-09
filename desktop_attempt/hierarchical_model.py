@@ -147,7 +147,7 @@ class HierarchicalCFBModel(nn.Module):
     @nn.compact
     def __call__(self, batch: Dict[str, jnp.ndarray], training: bool = False) -> Dict[str, jnp.ndarray]:
         # Get embeddings from embedding model
-        embeddings = self.embedding_model(batch['features'], training=training)
+        embeddings = self.embedding_model(batch['features'])
         
         # Reshape for hierarchical processing
         batch_size = embeddings.shape[0]
