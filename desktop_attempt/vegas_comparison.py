@@ -16,6 +16,15 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy import stats
+import os
+import sys
+import gc
+
+# Handle both Colab and local environments
+if 'google.colab' in sys.modules:
+    BASE_PATH = "/content/drive/MyDrive/cfb_model/"
+else:
+    BASE_PATH = os.path.expanduser("~/cfb_model/")
 
 @dataclass
 class VegasConfig:
@@ -44,7 +53,16 @@ class VegasSpreadEvaluator:
         
         # Setup logging
         self.logger = logging.getLogger('VegasEvaluator')
-        logging.basicConfig(level=logging.INFO)
+        
+        # Configure logging for Colab
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.StreamHandler(),
+                logging.FileHandler(os.path.join(BASE_PATH, 'logs/model.log'))
+            ] if os.path.exists(os.path.join(BASE_PATH, 'logs')) else [logging.StreamHandler()]
+        )
     
     def load_vegas_spreads(self, 
                           years: List[int],
@@ -169,7 +187,8 @@ class VegasSpreadEvaluator:
         """
         
         # Model predicted spread
-        df['model_spread'] = df['away_score_pred'] - df['home_score_pred']
+        df.loc[:, 'model_spread'] = df['away_score_pred'] - df['home_score_pred']
+        # Use .loc to avoid SettingWithCopyWarning
         
         # Actual spread
         df['actual_spread'] = df['away_score_actual'] - df['home_score_actual']
@@ -385,7 +404,7 @@ class VegasSpreadEvaluator:
         
         excess_returns = returns - (risk_free_rate / 365)  # Daily risk-free rate
         
-        if returns.std() > 0:
+        if returns.std() > 1e-8:  # Use small epsilon instead of 0
             return np.sqrt(252) * excess_returns.mean() / returns.std()  # Annualized
         return 0.0
     

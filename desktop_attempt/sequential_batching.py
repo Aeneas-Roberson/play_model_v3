@@ -13,6 +13,15 @@ import logging
 from collections import defaultdict
 import pickle
 from pathlib import Path
+import os
+import sys
+import gc
+
+# Handle both Colab and local environments
+if 'google.colab' in sys.modules:
+    BASE_PATH = "/content/drive/MyDrive/cfb_model/"
+else:
+    BASE_PATH = os.path.expanduser("~/cfb_model/")
 
 @dataclass
 class SequentialBatchConfig:
@@ -43,7 +52,16 @@ class CFBSequentialBatcher:
         
         # Setup logging
         self.logger = logging.getLogger('CFBSequentialBatcher')
-        logging.basicConfig(level=logging.INFO)
+        
+        # Configure logging for Colab
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.StreamHandler(),
+                logging.FileHandler(os.path.join(BASE_PATH, 'logs/model.log'))
+            ] if os.path.exists(os.path.join(BASE_PATH, 'logs')) else [logging.StreamHandler()]
+        )
         
     def create_game_sequences(self, 
                             preprocessed_data: Dict[str, jnp.ndarray],
@@ -184,7 +202,8 @@ class CFBSequentialBatcher:
                 if current_position >= max_seq_length:
                     break
                     
-                sequences['plays'][current_position] = play_indices[play_idx]
+                sequences['plays'][current_position] = int(play_indices[play_idx])
+                # Ensure integer type for indexing
                 sequences['drives'][current_position] = drive['drive_id']
                 sequences['temporal_positions'][current_position] = current_position / max_seq_length
                 current_position += 1
@@ -216,8 +235,8 @@ class CFBSequentialBatcher:
         }
         
         # Convert to JAX arrays
-        sequences_jax = {k: jnp.array(v) for k, v in sequences.items()}
-        mask_jax = jnp.array(mask)
+        sequences_jax = {k: jnp.array(v, dtype=jnp.float32) for k, v in sequences.items()}
+        mask_jax = jnp.array(mask, dtype=jnp.float32)
         
         return sequences_jax, mask_jax, metadata
     
@@ -234,7 +253,7 @@ class CFBSequentialBatcher:
                 batched_sequences[key] = jnp.stack(seq_list, axis=0)
         
         # Stack masks
-        batched_masks = jnp.stack(masks, axis=0) if masks else jnp.array([])
+        batched_masks = jnp.stack(masks, axis=0) if masks else jnp.array([], dtype=jnp.float32)
         
         return {
             'sequences': batched_sequences,
@@ -321,6 +340,16 @@ class CFBSequentialBatcher:
                              data: Dict[str, jnp.ndarray],
                              play_indices: List[int]) -> Dict[str, jnp.ndarray]:
         """Extract features for specific play indices"""
+        
+        # Add proper handling for empty indices:
+        if len(play_indices) == 0:
+            return {
+                'offense': jnp.array([], dtype=jnp.float32),
+                'defense': jnp.array([], dtype=jnp.float32),
+                'game_state': jnp.array([], dtype=jnp.float32),
+                'play_context': jnp.array([], dtype=jnp.float32),
+                'targets': jnp.array([], dtype=jnp.float32)
+            }
         
         features = {}
         
@@ -421,7 +450,7 @@ class CFBSequentialBatcher:
         
         # Convert back to JAX arrays
         jax_sequences = jax.tree_map(
-            lambda x: jnp.array(x) if isinstance(x, np.ndarray) else x,
+            lambda x: jnp.array(x, dtype=jnp.float32) if isinstance(x, np.ndarray) else x,
             numpy_sequences
         )
         

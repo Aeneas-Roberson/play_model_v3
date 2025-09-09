@@ -16,6 +16,14 @@ from dataclasses import dataclass
 import gc
 from datetime import datetime
 import yaml
+import os
+import sys
+
+# Handle both Colab and local environments
+if 'google.colab' in sys.modules:
+    BASE_PATH = "/content/drive/MyDrive/cfb_model/"
+else:
+    BASE_PATH = os.path.expanduser("~/cfb_model/")
 
 @dataclass
 class JoinConfig:
@@ -45,9 +53,18 @@ class CFBDataJoiner:
             'memory_peaks_gb': []
         }
         
-        # Setup logging
+        # Setup logging  
         self.logger = logging.getLogger('CFBDataJoiner')
-        logging.basicConfig(level=logging.INFO)
+        
+        # Configure logging for Colab
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.StreamHandler(),
+                logging.FileHandler(os.path.join(BASE_PATH, 'logs/model.log'))
+            ] if os.path.exists(os.path.join(BASE_PATH, 'logs')) else [logging.StreamHandler()]
+        )
         
         # Load football rules for validation
         self.football_rules = self._load_football_rules()
@@ -113,7 +130,7 @@ class CFBDataJoiner:
             'hierarchical_keys': []
         }
         
-        for week in weeks:
+        for week_idx, week in enumerate(weeks):
             week_data = self._load_and_join_week(year, week)
             
             if week_data is not None:
@@ -127,6 +144,10 @@ class CFBDataJoiner:
                 # Track hierarchical relationships
                 hierarchy = self._extract_hierarchy(week_data)
                 year_containers['hierarchical_keys'].append(hierarchy)
+                
+                # Add periodic garbage collection in long-running loops:
+                if week_idx % 4 == 0:  # Every 4 weeks
+                    gc.collect()
         
         # Concatenate weekly data
         if year_containers['offense_embedding']:
@@ -139,6 +160,11 @@ class CFBDataJoiner:
         
         table_names = ['offense_embedding', 'defense_embedding', 
                       'game_state_embedding', 'play_targets']
+        
+        # Add error handling for missing files
+        if not all(Path(self.base_path / f"{table_name}/{year}/week_{week}.parquet").exists() for table_name in table_names):
+            self.logger.warning(f"Skipping incomplete week: {year} week {week}")
+            return None
         
         tables = {}
         
@@ -191,7 +217,8 @@ class CFBDataJoiner:
                 df,
                 on='play_id',
                 how='inner',
-                suffixes=('', f'_{table_name}')
+                suffixes=('', f'_{table_name}'),
+                validate='one_to_one'  # Add validation to catch duplicate issues
             )
             
             # Drop duplicate columns immediately to save memory

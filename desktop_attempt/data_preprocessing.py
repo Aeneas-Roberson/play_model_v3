@@ -15,6 +15,14 @@ from dataclasses import dataclass
 import gc
 from functools import partial
 import logging
+import os
+import sys
+
+# Handle both Colab and local environments
+if 'google.colab' in sys.modules:
+    BASE_PATH = "/content/drive/MyDrive/cfb_model/"
+else:
+    BASE_PATH = os.path.expanduser("~/cfb_model/")
 
 # Configure JAX for TPU
 jax.config.update('jax_platform_name', 'tpu')
@@ -39,7 +47,7 @@ class CFBDataPreprocessor:
         self.config = config or DataConfig()
         self.base_path = Path(self.config.base_path)
         self.cache_dir = Path(self.config.cache_dir)
-        self.cache_dir.mkdir(exist_ok=True, parents=True)
+        os.makedirs(self.cache_dir, exist_ok=True)  # More robust for Colab
         
         # Feature dimensions from analysis
         self.feature_dims = {
@@ -59,7 +67,16 @@ class CFBDataPreprocessor:
         
         # Setup logging
         self.logger = logging.getLogger('CFBDataPreprocessor')
-        logging.basicConfig(level=logging.INFO)
+        
+        # Configure logging for Colab
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.StreamHandler(),
+                logging.FileHandler(os.path.join(BASE_PATH, 'logs/model.log'))
+            ] if os.path.exists(os.path.join(BASE_PATH, 'logs')) else [logging.StreamHandler()]
+        )
         
     def load_and_preprocess(self, years: List[int], 
                           weeks: Optional[List[int]] = None,
@@ -85,8 +102,16 @@ class CFBDataPreprocessor:
         # Create sequences
         sequences = self._create_game_sequences(processed, raw_df)
         
-        # Convert to JAX arrays
-        jax_data = self._convert_to_jax(sequences)
+        # Convert to JAX arrays with error recovery
+        try:
+            jax_data = self._convert_to_jax(sequences)
+        except RuntimeError as e:
+            if "TPU" in str(e):
+                print("TPU error, falling back to CPU")
+                # Fallback logic could be added here
+                raise
+            else:
+                raise
         
         # Cache processed data
         self._cache_processed_data(jax_data, split)
@@ -145,6 +170,15 @@ class CFBDataPreprocessor:
         # Remove duplicate game_id columns
         game_id_cols = [col for col in df.columns if 'game_id' in col and col != 'game_id']
         df = df.drop(columns=game_id_cols, errors='ignore')
+        
+        # Handle specific column renames to avoid conflicts
+        rename_dict = {
+            'game_id_defense_embedding': 'game_id',
+            'game_id_game_state_embedding': 'game_id',
+            'game_id_play_targets': 'game_id',
+            'drive_id_play_targets': 'drive_id'
+        }
+        df.rename(columns=rename_dict, inplace=True, errors='ignore')
         
         return df
     

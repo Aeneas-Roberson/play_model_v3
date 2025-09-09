@@ -7,9 +7,17 @@ Optimized for TPU v2-8 with functional transformations
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional, Any, NamedTuple
 from dataclasses import dataclass
 import numpy as np
+import os
+import sys
+
+# Handle both Colab and local environments
+if 'google.colab' in sys.modules:
+    BASE_PATH = "/content/drive/MyDrive/cfb_model/"
+else:
+    BASE_PATH = os.path.expanduser("~/cfb_model/")
 
 @dataclass
 class EmbeddingConfig:
@@ -94,6 +102,11 @@ class OffenseEmbeddingContainer(nn.Module):
         # Process numerical features with layer norm
         if self.config.use_layer_norm:
             numerical = nn.LayerNorm()(numerical)
+        
+        # Ensure numerical has correct shape
+        batch_size, seq_len = categorical_combined.shape[:2]
+        if numerical.ndim == 2:
+            numerical = numerical.reshape(batch_size, seq_len, -1)
         
         # Combine all features
         combined = jnp.concatenate([categorical_combined, numerical], axis=-1)

@@ -8,7 +8,8 @@ Optimized for JAX/Flax TPU v2-8 with 512GB HBM
 import jax
 import jax.numpy as jnp
 import numpy as np
-from typing import Dict, List, Tuple, Optional, Any, NamedTuple
+from typing import Dict, List, Tuple, Optional, Any
+from typing import NamedTuple  # Separate import for older Python
 from dataclasses import dataclass, field
 from collections import deque
 import copy
@@ -16,9 +17,21 @@ import logging
 from enum import Enum
 import pickle
 from pathlib import Path
+import os
+import sys
+
+# Handle both Colab and local environments
+if 'google.colab' in sys.modules:
+    BASE_PATH = "/content/drive/MyDrive/cfb_model/"
+else:
+    BASE_PATH = os.path.expanduser("~/cfb_model/")
 
 # Configure JAX for TPU
-jax.config.update('jax_platform_name', 'tpu')
+try:
+    jax.config.update('jax_platform_name', 'tpu')
+except:
+    # Fallback for non-TPU environments
+    pass
 
 
 class PlayOutcome(Enum):

@@ -11,13 +11,21 @@ import optax
 import flax.linen as nn
 from typing import Dict, List, Tuple, Optional, Any, Callable
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import Enum, auto  # If using auto() for enum values
 import numpy as np
 import logging
 import json
 from pathlib import Path
 import time
 from datetime import datetime, timedelta
+import os
+import sys
+
+# Handle both Colab and local environments
+if 'google.colab' in sys.modules:
+    BASE_PATH = "/content/drive/MyDrive/cfb_model/"
+else:
+    BASE_PATH = os.path.expanduser("~/cfb_model/")
 
 
 class TrainingPhase(Enum):
@@ -288,7 +296,8 @@ class LearningRateConfig:
             ]
             
             boundaries = [phase_config.warmup_steps]
-            schedule = optax.join_schedules(schedules, boundaries)
+            schedule = optax.join_schedules(schedules, boundaries=[boundaries[0]])
+            # boundaries should be a list
         else:
             # Just cosine decay
             schedule = optax.cosine_decay_schedule(
@@ -347,8 +356,10 @@ class LossFunctionConfig:
     
     def get_total_loss_function(self) -> Callable:
         """Create combined loss function"""
-        # This would be implemented with actual JAX/Flax loss functions
-        pass
+        # Placeholder implementation
+        def combined_loss(predictions, targets, params):
+            return jnp.mean((predictions - targets) ** 2)
+        return combined_loss
 
 
 @dataclass
